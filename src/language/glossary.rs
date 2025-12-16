@@ -1,4 +1,5 @@
 use core::fmt;
+use std::mem;
 
 use crate::language::cursor::CursorError;
 use crate::language::iter::*;
@@ -127,6 +128,7 @@ impl Term {
     pub fn compound(value: &str, terms: Vec<Term>) -> Self {
         Term::Compound(String::from(value), terms)
     }
+
     pub fn variable(value: &str) -> Self {
         Term::Variable(String::from(value))
     }
@@ -235,6 +237,11 @@ impl Literal {
         Literal::Negative(Atom::from(pred, terms))
     }
 
+    pub fn atom_mut(&mut self) -> &mut Atom {
+        match self {
+            Literal::Positive(a) | Literal::Negative(a) => a,
+        }
+    }
     pub fn atom(&self) -> &Atom {
         match self {
             Literal::Positive(a) | Literal::Negative(a) => a,

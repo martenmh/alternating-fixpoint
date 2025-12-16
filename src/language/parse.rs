@@ -134,10 +134,6 @@ impl<'a> Parser<'a> {
         if self.cursor.consume_if(":-") {
             let mut body: Vec<Literal> = vec![self.parse_literal()?];
             while !self.cursor.consume_if('.') {
-                println!(
-                    "head: {:?}\nbody: {:?}\ncursor:{:?}",
-                    head, body, self.cursor
-                );
                 self.cursor
                     .expect(',')
                     .map_err(|_| ParseError::UnexpectedEndOfRule)?;
