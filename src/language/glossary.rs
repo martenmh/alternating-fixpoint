@@ -2,6 +2,7 @@ use core::fmt;
 use std::mem;
 
 use crate::language::cursor::CursorError;
+use crate::language::ground::GroundLiteral;
 use crate::language::iter::*;
 
 /// A program consists of a set of rules & facts.
@@ -42,7 +43,7 @@ pub struct Program {
 /// fly(coconut).
 /// ```
 ///
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct Rule {
     pub head: Atom,
     pub body: Vec<Literal>,
@@ -72,7 +73,7 @@ pub struct Query {
 /// ```
 /// bigger(tux, eddy)
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct Atom {
     pub predicate: Identifier,
     pub terms: Vec<Term>,
@@ -83,20 +84,10 @@ pub struct Atom {
 /// ```
 /// fly(X), not fly(X)
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum Literal {
     Positive(Atom),
     Negative(Atom),
-}
-
-impl Literal {
-    fn is_complement(&self, other: &Literal) -> bool {
-        match (self, other) {
-            (Literal::Positive(lhs), Literal::Negative(rhs)) => lhs == rhs,
-            (Literal::Negative(lhs), Literal::Positive(rhs)) => lhs == rhs,
-            (_, _) => false,
-        }
-    }
 }
 
 /// Valid identifiers are of the following grammar
@@ -134,6 +125,26 @@ impl Term {
     }
     pub fn constant(value: &str) -> Self {
         Term::Constant(String::from(value))
+    }
+    pub const fn is_compound(&self) -> bool {
+        matches!(self, Term::Compound(_, _))
+    }
+    pub const fn is_variable(&self) -> bool {
+        matches!(self, Term::Variable(_))
+    }
+    pub const fn is_constant(&self) -> bool {
+        matches!(self, Term::Constant(_))
+    }
+
+    pub fn get_base_terms(&self) -> Vec<Term> {
+        match self {
+            Term::Variable(_) => vec![self.clone()],
+            Term::Constant(_) => vec![self.clone()],
+            Term::Compound(_, terms) => terms
+                .iter()
+                .flat_map(|term| term.get_base_terms())
+                .collect(),
+        }
     }
 }
 
@@ -179,16 +190,16 @@ impl Rule {
         })
     }
 
-    pub fn get_negatives(&self) -> Vec<&Literal> {
+    pub fn negative_literals(&self) -> Vec<&Literal> {
         self.body
             .iter()
-            .filter(|lit| matches!(lit, Literal::Negative(_)))
+            .filter(|lit| lit.is_negative())
             .collect::<Vec<&Literal>>()
     }
-    pub fn get_positives(&self) -> Vec<&Literal> {
+    pub fn positive_literals(&self) -> Vec<&Literal> {
         self.body
             .iter()
-            .filter(|lit| matches!(lit, Literal::Positive(_)))
+            .filter(|lit| lit.is_positive())
             .collect::<Vec<&Literal>>()
     }
 }
@@ -202,7 +213,7 @@ impl Atom {
     }
 
     /// Returns an iterator over all terms (including nested compound terms)
-    /// TODO: might wanna remove?
+    // TODO: might wanna remove?
     pub fn iter_terms(&self) -> impl Iterator<Item = &Term> + '_ {
         fn collect_terms<'a>(terms: &'a [Term], output: &mut Vec<&'a Term>) {
             for term in terms {
@@ -220,21 +231,44 @@ impl Atom {
 
     /// Returns an iterator over just the variables in this atom
     pub fn iter_variables(&self) -> impl Iterator<Item = &Term> + '_ {
-        self.iter_terms().filter(|t| matches!(t, Term::Variable(_)))
+        self.iter_terms().filter(|t| t.is_variable())
     }
 
     /// Returns an iterator over just the constants in this atom
     pub fn iter_constants(&self) -> impl Iterator<Item = &Term> + '_ {
-        self.iter_terms().filter(|t| matches!(t, Term::Constant(_)))
+        self.iter_terms().filter(|t| t.is_constant())
+    }
+
+    /// Clones the atom into a positive literal
+    pub fn into_positive(&self) -> Literal {
+        Literal::Positive(self.clone())
+    }
+
+    /// Clones the atom into a negative literal
+    pub fn into_negative(&self) -> Literal {
+        Literal::Negative(self.clone())
     }
 }
 
 impl Literal {
+    pub fn is_complement(&self, other: &Literal) -> bool {
+        match (self, other) {
+            (Literal::Positive(lhs), Literal::Negative(rhs)) => lhs == rhs,
+            (Literal::Negative(lhs), Literal::Positive(rhs)) => lhs == rhs,
+            (_, _) => false,
+        }
+    }
     pub fn positive(pred: &str, terms: Vec<Term>) -> Self {
         Literal::Positive(Atom::from(pred, terms))
     }
     pub fn negative(pred: &str, terms: Vec<Term>) -> Self {
         Literal::Negative(Atom::from(pred, terms))
+    }
+
+    pub fn to_positive(&self) -> Self {
+        match self {
+            Literal::Positive(a) | Literal::Negative(a) => Literal::Positive(a.clone()),
+        }
     }
 
     pub fn atom_mut(&mut self) -> &mut Atom {
@@ -246,6 +280,12 @@ impl Literal {
         match self {
             Literal::Positive(a) | Literal::Negative(a) => a,
         }
+    }
+    pub fn is_positive(&self) -> bool {
+        matches!(self, Literal::Positive(_))
+    }
+    pub fn is_negative(&self) -> bool {
+        matches!(self, Literal::Negative(_))
     }
 }
 

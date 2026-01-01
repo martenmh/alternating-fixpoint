@@ -1,29 +1,51 @@
 use std::{
     collections::{HashMap, HashSet},
-    result,
+    iter, result,
 };
 
+use either::Either;
 use itertools::Itertools;
 
-use crate::language::glossary::*;
+use crate::language::{glossary::*, ground::*};
 
-/// Current view of
-struct Interpretation {
-    positives: Vec<Atom>,
-    negatives: Vec<Atom>,
+/// The Herbrand Universe (all constants)
+pub type HerbrandUniverse = HashSet<Term>;
+
+/// Three valued logical value
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TruthValue {
+    True,
+    False,
+    Unknown,
 }
 
-struct Denotation {}
+struct Interpretation {
+    true_atoms: HashSet<Atom>,
+    false_atoms: HashSet<Atom>,
+}
 
-/// Things we know to be true,
-/// either inferred or stated as facts (from the "EDB")
-struct Assignments {
-    assign: Vec<Atom>,
+impl Interpretation {
+    pub fn new() -> Self {
+        Self {
+            true_atoms: HashSet::new(),
+            false_atoms: HashSet::new(),
+        }
+    }
+    /// Returns if we know an atom to be true or false, or unknown otherwise
+    pub fn truth_value(&self, atom: &Atom) -> TruthValue {
+        if self.true_atoms.contains(atom) {
+            TruthValue::True
+        } else if self.false_atoms.contains(atom) {
+            TruthValue::False
+        } else {
+            TruthValue::Unknown
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum SemanticError {
-    UngroundedFact,
+    UngroundedFact(Fact),
 }
 
 type Result<T> = result::Result<T, SemanticError>;
@@ -57,99 +79,264 @@ impl Rule {
             substitute_terms(&mut atom.terms, assignments);
         }
     }
-
-    //pub fn get_unique_variables(&self)
-    pub fn naive_ground_rule(&self, constants: Vec<Term>) -> Result<Rule> {
-        Err(SemanticError::UngroundedFact)
-    }
-}
-
-impl Term {
-    fn get_base_terms(&self) -> Vec<Term> {
-        match self {
-            Term::Variable(_) => vec![self.clone()],
-            Term::Constant(_) => vec![self.clone()],
-            Term::Compound(_, terms) => terms
-                .iter()
-                .flat_map(|term| term.get_base_terms())
-                .collect(),
-        }
-    }
 }
 
 impl Program {
-    pub fn herbrand_universe(&self) -> Result<Vec<Term>> {
-        // all constants from all facts
-        let domain: Vec<Term> = self
-            .facts
-            .iter()
+    /// Returns all unique constants of a program
+    pub fn herbrand_universe(&self, only_facts: bool) -> HerbrandUniverse {
+        let atom_iter = if only_facts {
+            Either::Left(self.facts.iter())
+        } else {
+            Either::Right(
+                self.facts
+                    .iter()
+                    .chain(self.rules.iter().flat_map(|rule| rule.iter_atoms())),
+            )
+        };
+        // all constants from all facts (& rules if only_facts = true)
+        atom_iter
             .flat_map(|fact| fact.terms.iter())
             .flat_map(|term| term.get_base_terms())
-            .collect();
-
-        // TODO: is the assumption that facts should be automatically ground valid?
-        // => if so, check if this assumption is true and otherwise return inference error
-        if domain.iter().any(|term| !matches!(term, Term::Constant(_))) {
-            return Err(SemanticError::UngroundedFact);
-        }
-        Ok(domain)
-    }
-
-    // Naive grounding algorithm, generate all ground instances of rules
-    // O(|constants|^|variables|) in regards to the amount of variables in a rule
-    pub fn naive_ground(&self) -> Result<Vec<Rule>> {
-        let constants = self.herbrand_universe()?;
-        // Know we know all ground constants
-        // Collect all variables
-        let mut ground_rule_permutations = Vec::new();
-
-        //self.rules.iter().map(|rule| rule.naive_ground_rule(constants)).collect();
-
-        for rule in self.rules.iter() {
-            let unique_variables: HashSet<&Term> = rule
-                .iter_terms()
-                .filter(|term| matches!(term, Term::Variable(_)))
-                .collect();
-            let n = unique_variables.len();
-
-            let assignment_permutations = std::iter::repeat(constants.iter())
-                .take(n)
-                .multi_cartesian_product();
-
-            for constants in assignment_permutations {
-                let mut grounded_rule = rule.clone(); // TODO: obviously very slow!!
-                let ungrounded_terms = grounded_rule
-                    .iter_terms()
-                    .filter(|term| matches!(term, Term::Variable(_)));
-
-                let mut variable_assignments = HashMap::<String, Term>::new();
-
-                for term in ungrounded_terms {
-                    let index = unique_variables.iter().position(|x| *x == term).unwrap();
-
-                    let a = constants.get(index).unwrap();
-                    if let Term::Variable(var) = term {
-                        variable_assignments.insert(var.clone(), (*a).clone());
-                    }
-                }
-                grounded_rule.substitute_variables(&variable_assignments);
-                ground_rule_permutations.push(grounded_rule);
-            }
-        }
-
-        Ok(ground_rule_permutations)
+            .filter(|term| term.is_constant())
+            .collect::<HerbrandUniverse>()
     }
 }
 
-fn S_A(I: Interpretation) {}
+/// An interpretation containing negative literals
+type LiteralSet = HashSet<GroundLiteral>;
+
+impl GroundProgram {
+    /// Returns all unique grounded atoms
+    pub fn herbrand_base(&self) -> HashSet<Ground<&Atom>> {
+        self.rules
+            .iter()
+            .flat_map(|rule| rule.iter_atoms())
+            .map(Ground::new_ref)
+            .collect::<HashSet<Ground<&Atom>>>()
+    }
+
+    pub fn immediate_consequence_operator(&self, i: &LiteralSet) {
+        todo!();
+    }
+
+    /// Returns the eventual consequences, only positive literals, standard bottom-up rule firing
+    /// lf_P(I)
+    /// Apply the immediate consequence operator until convergence
+    pub fn horn_least_fixpoint(&self, I: &LiteralSet) -> Result<LiteralSet> {
+        // what can we know, when we assume "i" is false?
+        println!("I in lf_P(): {}", I.iter().format(", "));
+        // assume :- T_P (program facts) ∪ I
+        let mut assumptions = self
+            .facts
+            .iter()
+            .map(|fact| fact.into_positive())
+            .collect::<LiteralSet>();
+        // we assume that I is positive
+        assumptions.extend(I.iter().map(|i| Ground::new(i.to_positive())));
+
+        println!("assumptions in lf_P(): {}", assumptions.iter().format(", "));
+        loop {
+            let prev_size = assumptions.len();
+            for rule in &self.rules {
+                let body_satisfied = rule
+                    .body()
+                    .iter()
+                    .filter(|lit| lit.is_positive()) // Make the rule into a horn clause
+                    .all(|lit| assumptions.contains(lit));
+                if body_satisfied {
+                    let head_lit = rule.head().into_positive();
+                    assumptions.insert(head_lit);
+                }
+            }
+            if assumptions.len() == prev_size {
+                break;
+            }
+        }
+        Ok(assumptions)
+    }
+
+    /// Negative consequences
+    // s_P(I) = ¬(H - S_P(I))
+    fn negative_complement(&self, I: &LiteralSet) -> Result<LiteralSet> {
+        // create all the negatives of atoms that are in H but not in the horn least fixpoint
+        let H = self.herbrand_base();
+
+        let S_P = self.horn_least_fixpoint(I)?;
+        println!("S_P: {}", S_P.iter().format(", "));
+        println!("H: {}", H.iter().format(", "));
+        let s_P = H
+            .iter()
+            .filter(|&atom| !S_P.contains(&atom.into_positive())) // H - S_P(I)
+            .map(|atom| atom.into_negative()) // ¬(...)
+            .collect::<LiteralSet>();
+        Ok(s_P)
+    }
+
+    /// Alternating operator
+    // A_P = s_P(s_P(I))
+    pub fn A_P(&self, I: &LiteralSet) -> Result<LiteralSet> {
+        println!("i: {}\n", I.iter().format(", "));
+        let tmp = self.negative_complement(I)?;
+
+        println!("tmp: {}\n", tmp.iter().format(", "));
+        let tmp2 = self.negative_complement(&tmp)?;
+        println!("tmp2 {}\n", tmp2.iter().format(", "));
+        Ok(tmp2)
+    }
+
+    // Solver
+    pub fn alternating_fixpoint(&self) -> Result<Interpretation> {
+        let mut loops = 0;
+        let mut I = LiteralSet::new(); // Assume nothing is false
+        loop {
+            loops += 1;
+            let i_next = self.A_P(&I)?;
+            if I.len() == i_next.len() && i_next.iter().all(|i| I.contains(i)) {
+                break; // convergence!
+            }
+            I = i_next;
+        }
+
+        let positives = self
+            .horn_least_fixpoint(&I)?
+            .iter()
+            .map(|lit| lit.atom().clone())
+            .collect::<HashSet<Atom>>();
+
+        println!("I: {}", I.iter().format(", "));
+        let interpretation = Interpretation {
+            true_atoms: positives,
+            false_atoms: I
+                .iter()
+                .map(|lit| lit.atom().clone())
+                .collect::<HashSet<Atom>>(),
+        };
+        Ok(interpretation)
+    }
+}
+
+/// Semi naive grounding algorithm, don't generate ground instances that are not possible
+pub fn semi_naive_ground(rule: &Program) -> Result<GroundProgram> {
+    todo!()
+}
+pub fn naive_ground_rule(rule: &Rule, constants: &HashSet<Term>) -> HashSet<Ground<Rule>> {
+    // Collect all variables from the current rule
+    let unique_variables: HashSet<&Term> = rule
+        .iter_terms()
+        .filter(|term| term.is_variable())
+        .collect();
+    let n = unique_variables.len();
+
+    let assignment_permutations = std::iter::repeat(constants.iter())
+        .take(n)
+        .multi_cartesian_product();
+
+    let mut ground_rule_permutations = HashSet::new();
+    for constants in assignment_permutations {
+        let mut grounded_rule = rule.clone(); // TODO: obviously very slow!!
+        let ungrounded_terms = grounded_rule.iter_terms().filter(|term| term.is_variable());
+
+        let mut variable_assignments = HashMap::<String, Term>::new();
+
+        for term in ungrounded_terms {
+            let index = unique_variables.iter().position(|x| *x == term).unwrap();
+
+            let a = constants.get(index).unwrap();
+            if let Term::Variable(var) = term {
+                variable_assignments.insert(var.clone(), (*a).clone());
+            }
+        }
+        grounded_rule.substitute_variables(&variable_assignments);
+        ground_rule_permutations.insert(Ground::new(grounded_rule));
+    }
+    ground_rule_permutations
+}
+
+/// Naive grounding algorithm, generate all possible ground instances of rules
+/// O(|constants|^|variables|)
+pub fn naive_ground(program: &Program) -> Result<GroundProgram> {
+    let constants = program.herbrand_universe(true);
+
+    Ok(GroundProgram {
+        facts: program
+            .facts
+            .iter()
+            .map(|atom| Ground::new(atom.clone()))
+            .collect(),
+        rules: program
+            .rules
+            .iter()
+            .flat_map(|rule| naive_ground_rule(rule, &constants))
+            .collect::<Vec<Ground<Rule>>>(),
+    })
+}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use itertools::Itertools;
 
-    use crate::language::parse::{parse_program, parse_rule};
+    use crate::language::{
+        glossary::*,
+        ground::*,
+        parse::{parse_program, parse_rule},
+        semantics::{LiteralSet, naive_ground},
+    };
+
+    fn create_program_results(
+        program: &str,
+        results: Vec<&'static str>,
+    ) -> (GroundProgram, Vec<&'static str>) {
+        let program = naive_ground(&parse_program(program).unwrap()).unwrap();
+        let positives = vec!["seagull(alberto)", "piano_player(alberto)"];
+        (program, positives)
+    }
+
+    // lalalala *kah kah*
+    fn alberto_the_piano_playing_seagull() -> (GroundProgram, Vec<&'static str>) {
+        create_program_results(
+            "
+            seagull(alberto).
+            piano_player(lien).
+            piano_player(X) :- seagull(alberto).
+            has_job(X) :- piano_player(X), not seagull(X).
+        ",
+            vec![
+                "seagull(alberto)",
+                "piano_player(alberto)",
+                "piano_player(lien)",
+                "has_job(lien)",
+            ],
+        )
+    }
+
+    fn tux_the_non_flying_penguin() -> (GroundProgram, Vec<&'static str>) {
+        create_program_results(
+            "
+            % instance
+            eagle(eddy).
+            penguin(tux).
+
+            % encoding
+            -fly(X) :- penguin(X).
+            bird(X) :- penguin(X).
+            bird(X) :- eagle(X).
+            fly(X) :- bird(X), not -fly(X).
+        ",
+            vec![
+                "bird(eddy)",
+                "bird(tux)",
+                "-fly(tux)",
+                "fly(eddy)",
+                "penguin(tux)",
+                "eagle(eddy)",
+            ],
+        )
+    }
 
     #[test]
+    // Step 1. Grounding of the input
     fn test_rule_grounding() {
         let program = parse_program(
             "
@@ -159,8 +346,7 @@ mod tests {
             comrad_of(X, Y) :- penguin(X), penguin(Y).     % all penguins are comrads
             friend_of(X) :- penguin(X), eagly(Y).          % all penguins are friend of eddy the eagle
         ",
-        )
-        .unwrap();
+        ).unwrap();
 
         let grounded_rules = vec![
             "fly(eddy) :- bird(eddy), not -fly(eddy).",
@@ -176,14 +362,68 @@ mod tests {
             "friend_of(tux) :- penguin(tux), eagly(eddy).",
             "friend_of(tux) :- penguin(tux), eagly(tux).",
         ];
-        let result = program.naive_ground().unwrap();
+        let grounded_program = naive_ground(&program).unwrap();
 
-        println!("{}", result.iter().format("\n"));
-        assert_eq!(grounded_rules.len(), result.len());
+        assert_eq!(grounded_rules.len(), grounded_program.rules.len());
         for rule in grounded_rules {
-            println!("parsing.. {}", rule);
-            let parsed_grounded_rule = parse_rule(rule).unwrap().unwrap_left();
-            assert!(result.contains(&parsed_grounded_rule));
+            let parsed_rule = parse_rule(rule).unwrap().unwrap_left();
+            let parsed_grounded_rule = Ground::new(parsed_rule);
+            assert!(grounded_program.rules.contains(&parsed_grounded_rule));
         }
+    }
+
+    #[test]
+    // Step 2. Horn least fixpoint
+    fn test_horn() {
+        let (grounded_program, _) = tux_the_non_flying_penguin();
+
+        let i = LiteralSet::new();
+        let inferred_idb = grounded_program
+            .horn_least_fixpoint(&i)
+            .unwrap()
+            .iter()
+            .map(|atom| format!("{}", atom))
+            .collect::<Vec<String>>();
+
+        let expected_idb = HashSet::from([
+            // EDB
+            "eagle(eddy)",
+            "penguin(tux)",
+            // IDB
+            "bird(eddy)",
+            "bird(tux)",
+            "-fly(tux)",
+            "fly(eddy)",
+            // Optimistic horn fixpoint evaluation causes us to think tux can fly
+            // Fixed by using the alternating fixpoint!
+            "fly(tux)",
+        ]);
+
+        let equal = inferred_idb
+            .iter()
+            .all(|fact| expected_idb.contains(fact.as_str()));
+        assert!(equal);
+    }
+
+    #[test]
+    fn test_alternating_fixpoint() {
+        let (program, positives) = tux_the_non_flying_penguin();
+        let interpretation = program.alternating_fixpoint().unwrap();
+        let strs: Vec<String> = interpretation
+            .true_atoms
+            .iter()
+            .map(|f| format!("{}", f))
+            .collect();
+
+        println!(
+            "positives: {{ {} }}",
+            interpretation.true_atoms.iter().format(", ")
+        );
+        println!(
+            "negatives: {{ {} }}",
+            interpretation.false_atoms.iter().format(", ")
+        );
+        let true_interpretation_matches = strs.iter().all(|t| positives.contains(&t.as_str()));
+        assert!(true_interpretation_matches);
     }
 }
