@@ -4,6 +4,14 @@ use itertools::Itertools;
 
 use crate::language::glossary::*;
 
+pub fn num_to_subscript(num: usize) -> &'static str {
+    let subscripts = vec!["₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉"];
+    match num {
+        0..9 => subscripts[num],
+        _ => "",
+    }
+}
+
 impl fmt::Display for Term {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -16,17 +24,22 @@ impl fmt::Display for Term {
 
 impl fmt::Display for Atom {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}({})", self.predicate, self.terms.iter().format(", "))
+        if self.terms.len() > 0 {
+            write!(f, "{}({})", self.predicate, self.terms.iter().format(", "))
+        } else {
+            write!(f, "{}", self.predicate)
+        }
     }
 }
 impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Literal::Positive(atom) => write!(f, "{}", atom),
-            Literal::Negative(atom) => write!(f, "not {}", atom),
+            Literal::Negative(atom) => write!(f, "not {}", atom), // ¬
         }
     }
 }
+
 impl fmt::Display for Rule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.head)?;

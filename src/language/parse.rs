@@ -112,7 +112,9 @@ impl<'a> Parser<'a> {
         let term = self.parse_term()?;
         match term {
             Term::Compound(identifier, terms) => Ok(Atom::from(&identifier, terms)),
-            _ => Err(ParseError::InvalidAtom(
+            Term::Constant(identifier) => Ok(Atom::from(&identifier, vec![])),
+            // We cannot have variables as atoms
+            Term::Variable(_) => Err(ParseError::InvalidAtom(
                 term,
                 (start, self.cursor.position()),
             )),
@@ -235,13 +237,16 @@ mod tests {
 
     #[test]
     fn test_parse_atoms() {
-        let atoms_input_expected = vec![(
-            "pred(term1, term2)",
-            Atom::from(
-                "pred",
-                vec![Term::constant("term1"), Term::constant("term2")],
+        let atoms_input_expected = vec![
+            (
+                "pred(term1, term2)",
+                Atom::from(
+                    "pred",
+                    vec![Term::constant("term1"), Term::constant("term2")],
+                ),
             ),
-        )];
+            ("arity_zero", Atom::from("arity_zero", vec![])),
+        ];
 
         for (atom, expectation) in atoms_input_expected {
             let mut parser = Parser::new(atom);

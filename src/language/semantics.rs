@@ -6,7 +6,7 @@ use std::{
 use either::Either;
 use itertools::Itertools;
 
-use crate::language::{glossary::*, ground::*};
+use crate::language::{glossary::*, ground::*, pretty};
 
 /// The Herbrand Universe (all constants)
 pub type HerbrandUniverse = HashSet<Term>;
@@ -20,8 +20,8 @@ pub enum TruthValue {
 }
 
 struct Interpretation {
-    true_atoms: HashSet<Atom>,
-    false_atoms: HashSet<Atom>,
+    true_atoms: HashSet<GroundAtom>,
+    false_atoms: HashSet<GroundAtom>,
 }
 
 impl Interpretation {
@@ -106,6 +106,25 @@ impl Program {
 type LiteralSet = HashSet<GroundLiteral>;
 
 impl GroundProgram {
+    pub fn get_unknowns<'a>(
+        &'a self,
+        interpretation: &'a Interpretation,
+    ) -> HashSet<Ground<&'a Atom>> {
+        // H di interpretation
+        let H = self
+            .herbrand_base()
+            .into_iter()
+            .collect::<HashSet<Ground<&Atom>>>();
+        let interpretation_atoms = interpretation
+            .true_atoms
+            .union(&interpretation.false_atoms)
+            .map(|a| a.inner())
+            .map(Ground::new_ref)
+            .collect::<HashSet<Ground<&Atom>>>();
+
+        H.difference(&interpretation_atoms).cloned().collect()
+    }
+
     /// Returns all unique grounded atoms
     pub fn herbrand_base(&self) -> HashSet<Ground<&Atom>> {
         self.rules
@@ -118,13 +137,13 @@ impl GroundProgram {
     pub fn immediate_consequence_operator(&self, i: &LiteralSet) {
         todo!();
     }
+    // https://dl.acm.org/doi/pdf/10.1145/73721.73722
 
     /// Returns the eventual consequences, only positive literals, standard bottom-up rule firing
     /// lf_P(I)
     /// Apply the immediate consequence operator until convergence
     pub fn horn_least_fixpoint(&self, I: &LiteralSet) -> Result<LiteralSet> {
         // what can we know, when we assume "i" is false?
-        println!("I in lf_P(): {}", I.iter().format(", "));
         // assume :- T_P (program facts) ∪ I
         let mut assumptions = self
             .facts
@@ -132,27 +151,33 @@ impl GroundProgram {
             .map(|fact| fact.into_positive())
             .collect::<LiteralSet>();
         // we assume that I is positive
-        assumptions.extend(I.iter().map(|i| Ground::new(i.to_positive())));
+        let mut result = assumptions.clone(); // all facts are included
+        assumptions.extend(I.iter().cloned());
 
-        println!("assumptions in lf_P(): {}", assumptions.iter().format(", "));
         loop {
-            let prev_size = assumptions.len();
+            let prev_size = result.len();
             for rule in &self.rules {
                 let body_satisfied = rule
                     .body()
                     .iter()
-                    .filter(|lit| lit.is_positive()) // Make the rule into a horn clause
+                    //.filter(|&lit| {result.contains(&Ground::new(lit.to_positive())) && lit.is_positive()}) // Make the rule into a horn clause
                     .all(|lit| assumptions.contains(lit));
                 if body_satisfied {
                     let head_lit = rule.head().into_positive();
+                    result.insert(head_lit.clone());
                     assumptions.insert(head_lit);
                 }
             }
-            if assumptions.len() == prev_size {
+            if result.len() == prev_size {
                 break;
             }
         }
-        Ok(assumptions)
+        println!(
+            "Sₚ({{{}}}) = {{{}}}",
+            I.iter().format(", "),
+            result.iter().format(", ")
+        );
+        Ok(result)
     }
 
     /// Negative consequences
@@ -162,26 +187,24 @@ impl GroundProgram {
         let H = self.herbrand_base();
 
         let S_P = self.horn_least_fixpoint(I)?;
-        println!("S_P: {}", S_P.iter().format(", "));
-        println!("H: {}", H.iter().format(", "));
+        println!("H: {{{}}}", H.iter().format(", "));
         let s_P = H
             .iter()
             .filter(|&atom| !S_P.contains(&atom.into_positive())) // H - S_P(I)
             .map(|atom| atom.into_negative()) // ¬(...)
             .collect::<LiteralSet>();
+        println!(
+            "Śₚ({{{}}}): {}",
+            I.iter().format(", "),
+            s_P.iter().format(", ")
+        );
         Ok(s_P)
     }
 
     /// Alternating operator
     // A_P = s_P(s_P(I))
     pub fn A_P(&self, I: &LiteralSet) -> Result<LiteralSet> {
-        println!("i: {}\n", I.iter().format(", "));
-        let tmp = self.negative_complement(I)?;
-
-        println!("tmp: {}\n", tmp.iter().format(", "));
-        let tmp2 = self.negative_complement(&tmp)?;
-        println!("tmp2 {}\n", tmp2.iter().format(", "));
-        Ok(tmp2)
+        self.negative_complement(&self.negative_complement(I)?)
     }
 
     // Solver
@@ -189,8 +212,13 @@ impl GroundProgram {
         let mut loops = 0;
         let mut I = LiteralSet::new(); // Assume nothing is false
         loop {
-            loops += 1;
+            println!(
+                "I{} = {{{}}}",
+                pretty::num_to_subscript(loops),
+                I.iter().format(", ")
+            );
             let i_next = self.A_P(&I)?;
+            loops += 2;
             if I.len() == i_next.len() && i_next.iter().all(|i| I.contains(i)) {
                 break; // convergence!
             }
@@ -200,16 +228,15 @@ impl GroundProgram {
         let positives = self
             .horn_least_fixpoint(&I)?
             .iter()
-            .map(|lit| lit.atom().clone())
-            .collect::<HashSet<Atom>>();
+            .map(|lit| Ground::new(lit.atom().clone()))
+            .collect::<HashSet<GroundAtom>>();
 
-        println!("I: {}", I.iter().format(", "));
         let interpretation = Interpretation {
             true_atoms: positives,
             false_atoms: I
                 .iter()
-                .map(|lit| lit.atom().clone())
-                .collect::<HashSet<Atom>>(),
+                .map(|lit| Ground::new(lit.atom().clone()))
+                .collect::<HashSet<GroundAtom>>(),
         };
         Ok(interpretation)
     }
@@ -284,13 +311,47 @@ mod tests {
         semantics::{LiteralSet, naive_ground},
     };
 
-    fn create_program_results(
-        program: &str,
-        results: Vec<&'static str>,
-    ) -> (GroundProgram, Vec<&'static str>) {
+    fn create_program_results<T>(program: &str, results: T) -> (GroundProgram, T) {
         let program = naive_ground(&parse_program(program).unwrap()).unwrap();
-        let positives = vec!["seagull(alberto)", "piano_player(alberto)"];
-        (program, positives)
+        (program, results)
+    }
+
+    fn allen_van_gelder() -> (GroundProgram, Vec<(Vec<&'static str>, Vec<&'static str>)>) {
+        create_program_results(
+            // d e f g h
+            "
+            a :- c, not b.
+            b :- not a.
+            c.
+
+            d :- e, not f.
+            d :- f, not g.
+            d :- h.
+            e :- d.
+            f :- e.
+            f :- not c.
+            i :- c, not d.
+        ",
+            // intermediate results
+            // k    (I_k,   S_P(I_k))
+            vec![
+                (vec![], vec!["c"]), // k = 0
+                (
+                    vec!["a", "b", "d", "e", "f", "g", "h", "i"],
+                    vec!["a", "b", "c", "i"],
+                ), // k = 1
+                (vec!["d", "e", "f", "g", "h"], vec!["c", "i"]), // k = 2
+                (
+                    vec!["a", "b", "d", "e", "f", "g", "h"],
+                    vec!["a", "b", "c", "i"],
+                ), // k = 3
+                (vec!["d", "e", "f", "g", "h"], vec!["c", "i"]), // k = 4
+            ],
+        )
+    }
+
+    fn not_not_recursion() -> (GroundProgram, Vec<&'static str>) {
+        create_program_results("p :- not q. q :- not p.", vec![])
     }
 
     // lalalala *kah kah*
@@ -299,7 +360,7 @@ mod tests {
             "
             seagull(alberto).
             piano_player(lien).
-            piano_player(X) :- seagull(alberto).
+            piano_player(X) :- seagull(X).
             has_job(X) :- piano_player(X), not seagull(X).
         ",
             vec![
@@ -333,6 +394,33 @@ mod tests {
                 "eagle(eddy)",
             ],
         )
+    }
+
+    #[test]
+    fn test_paper_intermediate_results() {
+        let (program, intermediate_results) = allen_van_gelder();
+
+        let mut I = LiteralSet::new(); // Assume nothing is false
+        for (i, s_p) in intermediate_results {
+            let S_p = program
+                .horn_least_fixpoint(&I)
+                .unwrap()
+                .iter()
+                .map(|a| format!("{}", a))
+                .sorted()
+                .collect::<Vec<String>>();
+
+            assert_eq!(s_p, S_p);
+            assert_eq!(
+                *i,
+                I.iter()
+                    .map(|a| format!("{}", a.to_positive()))
+                    .sorted()
+                    .collect::<Vec<String>>()
+            );
+
+            I = program.negative_complement(&I).unwrap();
+        }
     }
 
     #[test]
@@ -404,10 +492,18 @@ mod tests {
             .all(|fact| expected_idb.contains(fact.as_str()));
         assert!(equal);
     }
-
     #[test]
-    fn test_alternating_fixpoint() {
-        let (program, positives) = tux_the_non_flying_penguin();
+    fn test_alternating_fixpoints() {
+        for (program, positives) in vec![
+            tux_the_non_flying_penguin(),
+            alberto_the_piano_playing_seagull(),
+            not_not_recursion(),
+        ] {
+            test_alternating_fixpoint(program, positives);
+        }
+    }
+
+    fn test_alternating_fixpoint(program: GroundProgram, positives: Vec<&'static str>) {
         let interpretation = program.alternating_fixpoint().unwrap();
         let strs: Vec<String> = interpretation
             .true_atoms
@@ -415,15 +511,17 @@ mod tests {
             .map(|f| format!("{}", f))
             .collect();
 
+        println!("True: [{}]", interpretation.true_atoms.iter().format(", "));
         println!(
-            "positives: {{ {} }}",
-            interpretation.true_atoms.iter().format(", ")
-        );
-        println!(
-            "negatives: {{ {} }}",
+            "False: [{}]",
             interpretation.false_atoms.iter().format(", ")
         );
+        println!(
+            "Unknown: [{}]",
+            program.get_unknowns(&interpretation).iter().format(", ")
+        );
+
         let true_interpretation_matches = strs.iter().all(|t| positives.contains(&t.as_str()));
-        assert!(true_interpretation_matches);
+        assert!(true_interpretation_matches && strs.len() == positives.len());
     }
 }
